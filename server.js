@@ -2,6 +2,17 @@ const express=require('express'),http=require('http'),path=require('path'),fs=re
 const {Server}=require('socket.io'),multer=require('multer');
 const app=express(),server=http.createServer(app),io=new Server(server,{maxHttpBufferSize:1e6});
 const uploadDir=path.join(__dirname,'uploads');fs.mkdirSync(uploadDir,{recursive:true});
+
+app.get('/api/config', (req, res) => {
+  res.json({
+    service: 'Street Heat Live',
+    cameraEnabled: true,
+    microphoneEnabled: true,
+    screenShareEnabled: true,
+    signaling: 'socket.io',
+    socketPath: '/socket.io'
+  });
+});
 const upload=multer({storage:multer.diskStorage({destination:uploadDir,filename:(req,file,cb)=>cb(null,crypto.randomUUID()+path.extname(file.originalname).toLowerCase())}),limits:{fileSize:100*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^(audio\/|video\/)/.test(file.mimetype))});
 const library=[];const rooms=new Map();
 app.use(express.static(path.join(__dirname,'public')));app.get('/api/health',(req,res)=>res.json({ok:true,service:'Street Heat Live'}));
