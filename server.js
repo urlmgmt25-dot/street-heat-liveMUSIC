@@ -2,20 +2,10 @@ const express=require('express'),http=require('http'),path=require('path'),fs=re
 const {Server}=require('socket.io'),multer=require('multer');
 const app=express(),server=http.createServer(app),io=new Server(server,{maxHttpBufferSize:1e6});
 const uploadDir=path.join(__dirname,'uploads');fs.mkdirSync(uploadDir,{recursive:true});
-
-app.get('/api/config', (req, res) => {
-  res.json({
-    service: 'Street Heat Live',
-    cameraEnabled: true,
-    microphoneEnabled: true,
-    screenShareEnabled: true,
-    signaling: 'socket.io',
-    socketPath: '/socket.io'
-  });
-});
 const upload=multer({storage:multer.diskStorage({destination:uploadDir,filename:(req,file,cb)=>cb(null,crypto.randomUUID()+path.extname(file.originalname).toLowerCase())}),limits:{fileSize:100*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^(audio\/|video\/)/.test(file.mimetype))});
 const library=[];const rooms=new Map();
 app.use(express.static(path.join(__dirname,'public')));app.get('/api/health',(req,res)=>res.json({ok:true,service:'Street Heat Live'}));
+app.get('/api/config',(req,res)=>res.json({service:'Street Heat Live',cameraEnabled:true,microphoneEnabled:true,screenShareEnabled:true,signaling:'socket.io',socketPath:'/socket.io'}));
 app.get('/api/media',(req,res)=>res.json(library));
 app.post('/api/media',upload.single('media'),(req,res)=>{if(!req.file)return res.status(400).json({error:'Choose an audio or video file (100 MB max).'});const item={id:crypto.randomUUID(),name:req.file.originalname,url:'/media/'+req.file.filename,type:req.file.mimetype};library.push(item);res.json(item)});
 app.use('/media',express.static(uploadDir,{acceptRanges:true}));
