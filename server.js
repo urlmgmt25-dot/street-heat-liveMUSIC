@@ -1,0 +1,62 @@
+import express from 'express';
+import { createServer } from 'node:http';
+import { Server } from 'socket.io';
+import multer from 'multer';
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import 'dotenv/config';
+
+const app = express();
+const server = createServer(app);
+const io = new Server(server, { maxHttpBufferSize: 1e6 });
+const port = Number(process.env.PORT || 3000);
+const hostKey = process.env.HOST_KEY || 'dev-only-change-me';
+const root = process.cwd();
+const dataDir = path.join(root, 'data');
+const uploadDir = path.join(root, 'uploads');
+fs.mkdirSync(dataDir, {recursive:true}); fs.mkdirSync(uploadDir, {recursive:true});
+const storeFile = path.join(dataDir,'queue.json');
+let queue = [];
+try { queue = JSON.parse(fs.readFileSync(storeFile,'utf8')); } catch {}
+const persist = () => fs.writeFileSync(storeFile,JSON.stringify(queue,null,2));
+const rooms = new Map();
+const clean = (v, max=120) => String(v ?? '').trim().slice(0,max);
+const roomId = v => /^[a-zA-Z0-9_-]{3,40}$/.test(v||'') ? v : null;
+const isHost = socket => socket.data.host === true;
+const room = socket => rooms.get(socket.data.room);
+const broadcastRoom = id => { const r=rooms.get(id); if(r) io.to(id).emit('room-state',{participants:[...r.people.values()].map(p=>({id:p.id,name:p.name,host:p.host})), hostOnline:!!r.hostId}); };
+app.disable('x-powered-by');
+app.use(express.json({limit:'32kb'}));
+app.use(express.static(path.join(root,'public')));
+app.use('/uploads',express.static(uploadDir,{setHeaders:(res)=>res.setHeader('X-Content-Type-Options','nosniff')}));
+app.get('/api/config',(req,res)=>res.json({iceServers:[{urls:'stun:stun.l.google.com:19302'},...(process.env.TURN_URL?[{urls:process.env.TURN_URL,username:process.env.TURN_USERNAME,credential:process.env.TURN_CREDENTIAL}]:[])]}));
+app.get('/api/queue',(req,res)=>res.json(queue));
+app.post('/api/queue',(req,res)=>{const name=clean(req.body.artist),title=clean(req.body.title),link=clean(req.body.link,500);if(!name||!title)return res.status(400).json({error:'Artist and title required'});const item={id:crypto.randomUUID(),artist:name,title,link,score:null,status:'pending',createdAt:new Date().toISOString()};queue.push(item);persist();io.emit('queue-updated',queue);res.status(201).json(item);});
+const auth=(req,res,next)=>{if(req.get('x-host-key')!==hostKey)return res.status(401).json({error:'Invalid host key'});next();};
+app.patch('/api/queue/:id',auth,(req,res)=>{const item=queue.find(q=>q.id===req.params.id);if(!item)return res.sendStatus(404);if(['pending','reviewing','reviewed'].includes(req.body.status))item.status=req.body.status;if(req.body.score===null)item.score=null;else if(Number.isInteger(req.body.score)&&req.body.score>=0&&req.body.score<=10)item.score=req.body.score;persist();io.emit('queue-updated',queue);res.json(item);});
+app.delete('/api/queue/:id',auth,(req,res)=>{queue=queue.filter(q=>q.id!==req.params.id);persist();io.emit('queue-updated',queue);res.sendStatus(204);});
+const upload=multer({storage:multer.diskStorage({destination:uploadDir,filename:(req,file,cb)=>cb(null,crypto.randomUUID()+path.extname(file.originalname).toLowerCase())}),limits:{fileSize:100*1024*1024},fileFilter:(req,file,cb)=>cb(null,['audio/mpeg','audio/wav','audio/x-wav','audio/mp4','video/mp4','audio/ogg','video/webm'].includes(file.mimetype))});
+app.post('/api/upload',auth,upload.single('media'),(req,res)=>{if(!req.file)return res.status(400).json({error:'Supported audio/video file required'});res.json({url:'/uploads/'+req.file.filename,name:req.file.originalname});});
+app.get('/api/health',(req,res)=>res.json({ok:true,rooms:rooms.size}));
+io.on('connection',socket=>{
+ socket.on('join-room',({room:requested,name,key},ack=()=>{})=>{
+  const id=roomId(requested);if(!id)return ack({error:'Invalid room ID'});
+  const host=!!key && key===hostKey;
+  let r=rooms.get(id);if(!r){r={people:new Map(),hostId:null};rooms.set(id,r);}
+  if(host&&r.hostId&&r.hostId!==socket.id)return ack({error:'A host is already connected'});
+  if(r.people.size>=10)return ack({error:'Room is full (10 participants)'});
+  if(socket.data.room)return ack({error:'Already joined a room'});
+  socket.data={room:id,host,name:clean(name,40)||'Guest'};
+  socket.join(id);
+  const existing=[...r.people.values()].map(p=>({id:p.id,name:p.name,host:p.host}));
+  r.people.set(socket.id,{id:socket.id,name:socket.data.name,host});if(host)r.hostId=socket.id;
+  ack({id:socket.id,host,existing});socket.to(id).emit('peer-joined',{id:socket.id,name:socket.data.name,host});broadcastRoom(id);
+ });
+ socket.on('signal',({to,data})=>{const r=room(socket);if(r?.people.has(to)&&JSON.stringify(data||{}).length<100000)io.to(to).emit('signal',{from:socket.id,data});});
+ socket.on('chat',message=>{const r=room(socket);if(!r)return;io.to(socket.data.room).emit('chat',{from:socket.data.name,text:clean(message,500),at:Date.now()});});
+ socket.on('show-review',item=>{if(isHost(socket)&&room(socket))io.to(socket.data.room).emit('show-review',{artist:clean(item.artist),title:clean(item.title),score:item.score});});
+ socket.on('kick',id=>{const r=room(socket);if(!isHost(socket)||!r?.people.has(id))return;io.to(id).emit('kicked');io.sockets.sockets.get(id)?.disconnect(true);});
+ socket.on('disconnect',()=>{const id=socket.data.room;if(!id)return;const r=rooms.get(id);if(!r)return;r.people.delete(socket.id);if(r.hostId===socket.id)r.hostId=null;socket.to(id).emit('peer-left',socket.id);if(!r.people.size)rooms.delete(id);else broadcastRoom(id);});
+});
+server.listen(port,()=>console.log(`STREET HEAT LIVE at http://localhost:${port}`));
